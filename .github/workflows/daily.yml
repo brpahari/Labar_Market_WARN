@@ -1,0 +1,47 @@
+name: Daily WARN Scrape
+
+on:
+  schedule:
+    - cron: "15 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pandas openpyxl requests beautifulsoup4 pdfplumber lxml
+
+      - name: Run scrapers
+        run: |
+          python scripts/scrape_ca.py
+          python scripts/scrape_tx.py
+          python scripts/scrape_fl.py
+          python scripts/scrape_ny.py
+
+      - name: Build site artifacts
+        run: |
+          python scripts/build_current_year.py
+
+      - name: Broadcast updates
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python scripts/post_social.py
+
+      - name: Commit if changed
+        run: |
+          git config --global user.name "WARN Bot"
+          git config --global user.email "warn-bot@users.noreply.github.com"
+          git add data site/current_year.csv site/mappings.json site/history_snapshot.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update WARN data" && git push)
