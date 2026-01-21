@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WARN Intel | National Layoff Tracker</title>
+  <meta name="description" content="Track WARN notices and layoffs across the US. Aggregated from official state sources daily.">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #f7f7f7; color: #111; }
+    
+    /* NEW: Validation Bar */
+    .top-bar { background: #222; color: white; padding: 10px 16px; font-size: 13px; text-align: center; }
+    .top-bar a { color: #fff; font-weight: 600; text-decoration: underline; margin-left: 8px; }
+    .top-bar a:hover { color: #ddd; }
+
+    header { background: white; border-bottom: 1px solid #e6e6e6; padding: 18px 16px; position: sticky; top: 0; z-index: 10; }
+    h1 { font-size: 18px; margin: 0 0 10px; }
+    .sub { font-size: 13px; color: #444; margin: 0; }
+    .wrap { max-width: 1200px; margin: 0 auto; }
+    .controls { display: grid; grid-template-columns: 1fr 140px 160px 160px; gap: 10px; margin-top: 12px; }
+    input, select { width: 100%; padding: 10px 10px; border: 1px solid #d8d8d8; border-radius: 10px; background: white; font-size: 14px; }
+    main { padding: 16px; }
+    .card { background: white; border: 1px solid #e6e6e6; border-radius: 14px; overflow: hidden; box-shadow: 0 1px 0 rgba(0,0,0,0.03); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #efefef; text-align: left; vertical-align: top; font-size: 14px; }
+    th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; background: #fafafa; position: sticky; top: 130px; z-index: 5; }
+    tr:hover td { background: #fcfcfc; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #e2e2e2; font-size: 12px; color: #333; background: #fff; }
+    .muted { color: #666; font-size: 12px; }
+    .num { font-variant-numeric: tabular-nums; }
+    .right { text-align: right; }
+    .link { color: #0b57d0; text-decoration: none; }
+    .link:hover { text-decoration: underline; }
+    .footer { padding: 16px; color: #666; font-size: 12px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+    button { padding: 10px 12px; border: 1px solid #d8d8d8; background: white; border-radius: 10px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #fafafa; }
+    .kpi { display: flex; gap: 10px; align-items: baseline; }
+    .kpi strong { font-size: 16px; }
+    .error { color: #b00020; font-size: 13px; margin-top: 10px; }
+    @media (max-width: 900px) {
+      .controls { grid-template-columns: 1fr 1fr; }
+      th { top: 160px; }
+      .top-bar { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <div class="top-bar">
+    <span>Get email alerts when new companies list layoffs in your state.</span>
+    <a href="LINK_HERE" target="_blank">Join Alert Waitlist &rarr;</a>
+  </div>
+
+  <header>
+    <div class="wrap">
+      <h1>WARN Intel</h1>
+      <p class="sub">Fast national view of WARN notices. Updated daily.</p>
+
+      <div class="controls">
+        <input id="q" placeholder="Search company, city, state" autocomplete="off" />
+        <select id="state">
+          <option value="">All states</option>
+        </select>
+        <select id="sort">
+          <option value="notice_date_desc">Notice date newest</option>
+          <option value="notice_date_asc">Notice date oldest</option>
+          <option value="employee_desc">Employee count high</option>
+          <option value="employee_asc">Employee count low</option>
+        </select>
+        <select id="days">
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="365">Last 365 days</option>
+          <option value="99999">All</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <div class="kpi">
+          <strong id="kpiCount">0</strong>
+          <span class="muted">notices shown</span>
+        </div>
+        <div class="kpi">
+          <strong id="kpiAffected">0</strong>
+          <span class="muted">sum affected</span>
+        </div>
+        <button id="reset">Reset</button>
+        <span class="muted" id="updated"></span>
+      </div>
+
+      <div id="err" class="error" style="display:none;"></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <div class="card">
+        <div style="overflow:auto; max-height: calc(100vh - 260px);"> <table>
+            <thead>
+              <tr>
+                <th style="min-width:240px;">Company</th>
+                <th style="min-width:120px;">State</th>
+                <th style="min-width:160px;">City</th>
+                <th style="min-width:140px;">Notice date</th>
+                <th style="min-width:150px;">Effective date</th>
+                <th style="min-width:140px;" class="right">Affected</th>
+                <th style="min-width:120px;">Source</th>
+              </tr>
+            </thead>
+            <tbody id="tbody">
+              <tr><td colspan="7" class="muted">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="footer">
+          Data aggregated from official state WARN sources. Not legal advice.
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const CSV_URL = "./current_year.csv";
+    const MAP_URL = "./mappings.json";
+
+    const elTbody = document.getElementById("tbody");
+    const elQ = document.getElementById("q");
+    const elState = document.getElementById("state");
+    const elSort = document.getElementById("sort");
+    const elDays = document.getElementById("days");
+    const elReset = document.getElementById("reset");
+    const elKpiCount = document.getElementById("kpiCount");
+    const elKpiAffected = document.getElementById("kpiAffected");
+    const elUpdated = document.getElementById("updated");
+    const elErr = document.getElementById("err");
+
+    let rows = [];
+    let mappings = {};
+
+    function showError(msg) {
+      elErr.style.display = "block";
+      elErr.textContent = msg;
+    }
+
+    function hideError() {
+      elErr.style.display = "none";
+      elErr.textContent = "";
+    }
+
+    function parseCSV(text) {
+      const lines = text.replace(/\r/g, "").split("\n").filter(Boolean);
+      if (lines.length < 2) return [];
+      const headers = splitCSVLine(lines[0]).map(s => s.trim());
+      const out = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = splitCSVLine(lines[i]);
+        const obj = {};
+        for (let j = 0; j < headers.length; j++) {
+          obj[headers[j]] = (cols[j] ?? "").trim();
+        }
+        out.push(obj);
+      }
+      return out;
+    }
+
+    function splitCSVLine(line) {
+      const res = [];
+      let cur = "";
+      let inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"' ) {
+          if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+          else { inQ = !inQ; }
+        } else if (ch === "," && !inQ) {
+          res.push(cur);
+          cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+      res.push(cur);
+      return res;
+    }
+
+    function normKey(s) {
+      return (s || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function cleanName(row) {
+      if (row.clean_name && row.clean_name.length) return row.clean_name;
+      const key = normKey(row.company || "");
+      return mappings[key] || (row.company || "");
+    }
+
+    function toInt(x) {
+      const n = parseInt(String(x || "").replace(/[^0-9\-]/g, ""), 10);
+      if (Number.isNaN(n)) return 0;
+      return n;
+    }
+
+    function toDateValue(s) {
+      if (!s) return 0;
+      const d = new Date(s);
+      const t = d.getTime();
+      return Number.isFinite(t) ? t : 0;
+    }
+
+    function withinDays(noticeDate, days) {
+      if (!noticeDate) return false;
+      const now = Date.now();
+      const t = toDateValue(noticeDate);
+      if (!t) return false;
+      const diffDays = (now - t) / (1000 * 60 * 60 * 24);
+      return diffDays <= days;
+    }
+
+    function buildStateOptions(allRows) {
+      elState.innerHTML = '<option value="">All states</option>'; 
+      const states = Array.from(new Set(allRows.map(r => (r.state || "").trim()).filter(Boolean))).sort();
+      for (const s of states) {
+        const opt = document.createElement("option");
+        opt.value = s;
+        opt.textContent = s;
+        elState.appendChild(opt);
+      }
+    }
+
+    function applyFilters() {
+      hideError();
+      const q = normKey(elQ.value);
+      const st = elState.value;
+      const sort = elSort.value;
+      const days = parseInt(elDays.value, 10);
+
+      let filtered = rows.slice();
+
+      if (days !== 99999) {
+        filtered = filtered.filter(r => withinDays(r.notice_date, days));
+      }
+
+      if (st) {
+        filtered = filtered.filter(r => (r.state || "").trim() === st);
+      }
+
+      if (q) {
+        filtered = filtered.filter(r => {
+          const c = normKey(cleanName(r));
+          const raw = normKey(r.company);
+          const city = normKey(r.city);
+          const state = normKey(r.state);
+          return (c.includes(q) || raw.includes(q) || city.includes(q) || state.includes(q));
+        });
+      }
+
+      if (sort === "notice_date_desc") {
+        filtered.sort((a,b) => toDateValue(b.notice_date) - toDateValue(a.notice_date));
+      } else if (sort === "notice_date_asc") {
+        filtered.sort((a,b) => toDateValue(a.notice_date) - toDateValue(b.notice_date));
+      } else if (sort === "employee_desc") {
+        filtered.sort((a,b) => toInt(b.employee_count) - toInt(a.employee_count));
+      } else if (sort === "employee_asc") {
+        filtered.sort((a,b) => toInt(a.employee_count) - toInt(b.employee_count));
+      }
+
+      render(filtered);
+    }
+
+    function render(list) {
+      const maxRows = 2000;
+      const shown = list.slice(0, maxRows);
+
+      let sum = 0;
+      for (const r of shown) sum += Math.max(0, toInt(r.employee_count));
+
+      elKpiCount.textContent = String(list.length);
+      elKpiAffected.textContent = String(sum);
+
+      if (!shown.length) {
+        elTbody.innerHTML = `<tr><td colspan="7" class="muted">No results</td></tr>`;
+        return;
+      }
+
+      const html = shown.map(r => {
+        const company = escapeHtml(cleanName(r));
+        const state = escapeHtml(r.state || "");
+        const city = escapeHtml(r.city || "");
+        const notice = escapeHtml(r.notice_date || "");
+        const effective = escapeHtml(r.effective_date || "");
+        const count = toInt(r.employee_count);
+        const source = (r.source_url || "").trim();
+
+        const sourceCell = source
+          ? `<a class="link" href="${escapeAttr(source)}" target="_blank" rel="noopener">View</a>`
+          : `<span class="muted">n/a</span>`;
+
+        return `
+          <tr>
+            <td><div>${company}</div><div class="muted">${escapeHtml(r.company || "")}</div></td>
+            <td><span class="pill">${state}</span></td>
+            <td>${city}</td>
+            <td class="num">${notice}</td>
+            <td class="num">${effective}</td>
+            <td class="right num">${count ? count : ""}</td>
+            <td>${sourceCell}</td>
+          </tr>
+        `;
+      }).join("");
+
+      elTbody.innerHTML = html;
+
+      if (list.length > maxRows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7" class="muted">Showing first ${maxRows} rows. Narrow filters to see more.</td>`;
+        elTbody.appendChild(tr);
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function escapeAttr(s) {
+      return escapeHtml(s).replaceAll(" ", "%20");
+    }
+
+    async function loadAll() {
+      try {
+        const mapResp = await fetch(MAP_URL, { cache: "no-store" });
+        if (mapResp.ok) mappings = await mapResp.json();
+      } catch (e) {
+        mappings = {};
+      }
+
+      const resp = await fetch(CSV_URL, { cache: "no-store" });
+      if (!resp.ok) {
+        showError("Could not load database. Please wait for the daily build to finish.");
+        return;
+      }
+      const text = await resp.text();
+      rows = parseCSV(text);
+
+      if (!rows.length) {
+        elTbody.innerHTML = `<tr><td colspan="7" class="muted">No data loaded</td></tr>`;
+        return;
+      }
+
+      buildStateOptions(rows);
+
+      const newest = rows
+        .map(r => r.notice_date)
+        .filter(Boolean)
+        .map(d => new Date(d).getTime())
+        .filter(t => Number.isFinite(t))
+        .sort((a,b) => b - a)[0];
+
+      if (newest) {
+        const dt = new Date(newest);
+        elUpdated.textContent = "Newest notice " + dt.toISOString().slice(0,10);
+      }
+
+      applyFilters();
+    }
+
+    elQ.addEventListener("input", () => applyFilters());
+    elState.addEventListener("change", () => applyFilters());
+    elSort.addEventListener("change", () => applyFilters());
+    elDays.addEventListener("change", () => applyFilters());
+
+    elReset.addEventListener("click", () => {
+      elQ.value = "";
+      elState.value = "";
+      elSort.value = "notice_date_desc";
+      elDays.value = "30";
+      applyFilters();
+    });
+
+    loadAll();
+  </script>
+</body>
+</html>
