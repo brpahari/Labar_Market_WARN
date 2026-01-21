@@ -9,18 +9,17 @@ from io import BytesIO
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-from common import norm_text, apply_clean_name, make_hash_id, upsert_append_csv
+from common import apply_clean_name, make_hash_id, upsert_append_csv
 
 STATE = "NY"
 BASE = "https://dol.ny.gov"
 YEAR = datetime.utcnow().year
 
 LISTING_URL = f"{BASE}/{YEAR}-warn-notices"
-OUT_DIR = f"data/ny"
+OUT_DIR = "data/ny"
 OUT_FILE = f"{OUT_DIR}/{YEAR}.csv"
 MAPPINGS_FILE = "site/mappings.json"
 
-# Use session for connection pooling
 session = requests.Session()
 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -72,7 +71,7 @@ def extract_pdf_fields(pdf_bytes: bytes) -> dict:
     if affected:
         try:
             employee_count = int(affected.replace(",", ""))
-        except:
+        except Exception:
             pass
 
     return {
@@ -91,11 +90,10 @@ def main():
         with open(MAPPINGS_FILE, "r", encoding="utf-8") as f:
             mappings = json.load(f)
 
-    # 1. Load History (Lazy Check)
     seen_urls = set()
     if os.path.exists(OUT_FILE):
         try:
-            df_history = pd.read_csv(OUT_FILE)
+            df_history = pd.read_csv(OUT_FILE, dtype=str).fillna("")
             if "source_url" in df_history.columns:
                 seen_urls = set(df_history["source_url"].astype(str).str.strip().tolist())
         except Exception:
@@ -107,33 +105,31 @@ def main():
         print(f"NY listing fetch failed: {e}")
         return
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "lxml")
 
     rows = []
-    for a in soup.select("a"):
+    for a in soup.select("a[href]"):
         href = a.get("href") or ""
         if href.startswith("/warn-") or "/warn-" in href:
             url = href if href.startswith("http") else BASE + href
-            
-            # Normalize for set comparison
             url_clean = url.strip()
-            
+
             if url_clean in seen_urls:
                 continue
 
-            time.sleep(0.7) # Polite rate limit
+            time.sleep(0.7)
 
             try:
-                pdf_bytes = session.get(url, headers=headers, timeout=30).content
+                pdf_bytes = session.get(url_clean, headers=headers, timeout=30).content
                 fields = extract_pdf_fields(pdf_bytes)
             except Exception as e:
-                print(f"Failed parsing {url}: {e}")
+                print(f"Failed parsing {url_clean}: {e}")
                 continue
 
             company = fields.get("company") or a.get_text(strip=True)
-            notice_date = fields.get("notice_date")
-            effective_date = fields.get("effective_date")
-            city = fields.get("city")
+            notice_date = fields.get("notice_date", "")
+            effective_date = fields.get("effective_date", "")
+            city = fields.get("city", "")
             employee_count = fields.get("employee_count", 0)
 
             clean_name = apply_clean_name(company, mappings)
@@ -145,7 +141,7 @@ def main():
                 "clean_name": clean_name,
                 "notice_date": notice_date,
                 "effective_date": effective_date,
-                "employee_count": employee_count,
+                "employee_count": str(employee_count),
                 "city": city,
                 "state": STATE,
                 "source_url": url_clean
