@@ -7,8 +7,7 @@
   <meta name="description" content="Track WARN notices and layoffs across the US. Aggregated from official state sources daily.">
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #f7f7f7; color: #111; }
-    
-    /* NEW: Validation Bar */
+
     .top-bar { background: #222; color: white; padding: 10px 16px; font-size: 13px; text-align: center; }
     .top-bar a { color: #fff; font-weight: 600; text-decoration: underline; margin-left: 8px; }
     .top-bar a:hover { color: #ddd; }
@@ -23,7 +22,7 @@
     .card { background: white; border: 1px solid #e6e6e6; border-radius: 14px; overflow: hidden; box-shadow: 0 1px 0 rgba(0,0,0,0.03); }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 10px 12px; border-bottom: 1px solid #efefef; text-align: left; vertical-align: top; font-size: 14px; }
-    th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; background: #fafafa; position: sticky; top: 130px; z-index: 5; }
+    th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; background: #fafafa; position: sticky; top: 170px; z-index: 5; }
     tr:hover td { background: #fcfcfc; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #e2e2e2; font-size: 12px; color: #333; background: #fff; }
     .muted { color: #666; font-size: 12px; }
@@ -38,9 +37,10 @@
     .kpi { display: flex; gap: 10px; align-items: baseline; }
     .kpi strong { font-size: 16px; }
     .error { color: #b00020; font-size: 13px; margin-top: 10px; }
+
     @media (max-width: 900px) {
       .controls { grid-template-columns: 1fr 1fr; }
-      th { top: 160px; }
+      th { top: 210px; }
       .top-bar { text-align: left; }
     }
   </style>
@@ -48,7 +48,7 @@
 <body>
   <div class="top-bar">
     <span>Get email alerts when new companies list layoffs in your state.</span>
-    <a href="LINK_HERE" target="_blank">Join Alert Waitlist &rarr;</a>
+    <a href="LINK_HERE" target="_blank" rel="noopener">Join Alert Waitlist →</a>
   </div>
 
   <header>
@@ -95,7 +95,8 @@
   <main>
     <div class="wrap">
       <div class="card">
-        <div style="overflow:auto; max-height: calc(100vh - 260px);"> <table>
+        <div style="overflow:auto; max-height: calc(100vh - 260px);">
+          <table>
             <thead>
               <tr>
                 <th style="min-width:240px;">Company</th>
@@ -169,8 +170,8 @@
       let inQ = false;
       for (let i = 0; i < line.length; i++) {
         const ch = line[i];
-        if (ch === '"' ) {
-          if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+        if (ch === '"') {
+          if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
           else { inQ = !inQ; }
         } else if (ch === "," && !inQ) {
           res.push(cur);
@@ -220,7 +221,7 @@
     }
 
     function buildStateOptions(allRows) {
-      elState.innerHTML = '<option value="">All states</option>'; 
+      elState.innerHTML = '<option value="">All states</option>';
       const states = Array.from(new Set(allRows.map(r => (r.state || "").trim()).filter(Boolean))).sort();
       for (const s of states) {
         const opt = document.createElement("option");
@@ -258,13 +259,13 @@
       }
 
       if (sort === "notice_date_desc") {
-        filtered.sort((a,b) => toDateValue(b.notice_date) - toDateValue(a.notice_date));
+        filtered.sort((a, b) => toDateValue(b.notice_date) - toDateValue(a.notice_date));
       } else if (sort === "notice_date_asc") {
-        filtered.sort((a,b) => toDateValue(a.notice_date) - toDateValue(b.notice_date));
+        filtered.sort((a, b) => toDateValue(a.notice_date) - toDateValue(b.notice_date));
       } else if (sort === "employee_desc") {
-        filtered.sort((a,b) => toInt(b.employee_count) - toInt(a.employee_count));
+        filtered.sort((a, b) => toInt(b.employee_count) - toInt(a.employee_count));
       } else if (sort === "employee_asc") {
-        filtered.sort((a,b) => toInt(a.employee_count) - toInt(b.employee_count));
+        filtered.sort((a, b) => toInt(a.employee_count) - toInt(b.employee_count));
       }
 
       render(filtered);
@@ -361,11 +362,11 @@
         .filter(Boolean)
         .map(d => new Date(d).getTime())
         .filter(t => Number.isFinite(t))
-        .sort((a,b) => b - a)[0];
+        .sort((a, b) => b - a)[0];
 
       if (newest) {
         const dt = new Date(newest);
-        elUpdated.textContent = "Newest notice " + dt.toISOString().slice(0,10);
+        elUpdated.textContent = "Newest notice " + dt.toISOString().slice(0, 10);
       }
 
       applyFilters();
