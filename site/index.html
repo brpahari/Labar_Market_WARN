@@ -241,7 +241,10 @@
       let filtered = rows.slice();
 
       if (days !== 99999) {
-        filtered = filtered.filter(r => withinDays(r.notice_date, days));
+        filtered = filtered.filter(r => {
+          if (!r.notice_date) return true;
+          return withinDays(r.notice_date, days);
+  });
       }
 
       if (st) {
