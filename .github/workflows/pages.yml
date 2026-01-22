@@ -23,14 +23,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug list site
+        run: |
+          echo "Listing site folder"
+          ls -la ./site
+          echo "Files"
+          find ./site -maxdepth 2 -type f -print
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          path: "site"
+          name: github-pages
+          path: site
+          if-no-files-found: error
 
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages
