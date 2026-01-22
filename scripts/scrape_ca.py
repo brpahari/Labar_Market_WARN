@@ -1,38 +1,31 @@
 import os
-import sys
 import json
-import requests
-import pandas as pd
+import re
 from io import BytesIO
 from datetime import datetime
+import html as htmlmod
 
-# --- SETUP PATH TO FIND COMMON.PY ---
-# This ensures we can import common whether running from root or scripts/
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
-sys.path.insert(0, current_dir)
+import requests
+import pandas as pd
 
-try:
-    from common import apply_clean_name, make_hash_id, upsert_append_csv
-except ImportError:
-    print("CRITICAL ERROR: Could not import 'common.py'. Make sure it exists in the scripts folder.")
-    sys.exit(1)
+from common import apply_clean_name, make_hash_id, upsert_append_csv
 
-# --- CONFIG ---
 STATE = "CA"
 YEAR = datetime.utcnow().year
-OUT_DIR = os.path.join("data", "ca")  # Cross-platform path
-OUT_FILE = os.path.join(OUT_DIR, f"{YEAR}.csv")
-MAPPINGS_FILE = os.path.join("site", "mappings.json")
-URL = "https://edd.ca.gov/siteassets/files/jobs_and_training/warn/warn_report.xlsx"
 
-WANTED_COLS = [
-    "hash_id", "company", "clean_name", "notice_date", 
-    "effective_date", "employee_count", "city", "state", "source_url"
-]
+OUT_DIR = "data/ca"
+OUT_FILE = f"{OUT_DIR}/{YEAR}.csv"
 
-def load_mappings():
+MAPPINGS_FILE = "site/mappings.json"
+
+# This workbook actually contains the detailed table
+CA_XLSX_URL = "https://edd.ca.gov/siteassets/files/jobs_and_training/warn/warn_report1.xlsx"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
+def load_mappings() -> dict:
     if not os.path.exists(MAPPINGS_FILE):
         return {}
     try:
@@ -41,140 +34,109 @@ def load_mappings():
     except Exception:
         return {}
 
-def parse_date(val):
-    if pd.isna(val) or str(val).strip() == "":
+def parse_date(val) -> str:
+    dt = pd.to_datetime(val, errors="coerce")
+    if pd.isna(dt):
         return ""
-    try:
-        dt = pd.to_datetime(val, errors="coerce")
-        if pd.isna(dt):
-            return ""
-        return dt.strftime("%Y-%m-%d")
-    except:
+    return dt.strftime("%Y-%m-%d")
+
+def extract_city_from_address(addr: str) -> str:
+    a = str(addr or "").strip()
+    if not a:
         return ""
 
-def find_header_and_data(df):
-    """
-    Scans a dataframe to find the row that looks like a header 
-    (contains 'Company' and 'Notice Date'), then returns the cleaned data.
-    """
-    # 1. Scan first 20 rows for a header
-    header_idx = -1
-    for idx, row in df.head(20).iterrows():
-        # Convert entire row to string, lowercase, to search for keywords
-        row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
-        if "company" in row_str and "notice" in row_str:
-            header_idx = idx
-            break
-    
-    if header_idx == -1:
-        return None, "Could not find header row with 'Company' and 'Notice'"
+    a = htmlmod.unescape(a)
+    a = re.sub(r"\s+", " ", a).strip()
 
-    # 2. Reload/Slice using that header
-    # We take the row at header_idx as columns, and data below it
-    new_columns = df.iloc[header_idx].astype(str).str.strip()
-    df_data = df.iloc[header_idx+1:].copy()
-    df_data.columns = new_columns
-    
-    return df_data, None
+    # Try pattern "... <City> CA <zip>"
+    m = re.search(r"\s([A-Za-z][A-Za-z \-\.']+)\sCA\s\d{5}(-\d{4})?$", a)
+    if m:
+        return m.group(1).strip()
+
+    # Fallback if format is "street  city CA zip" with double spaces in the original
+    parts = re.split(r"\s{2,}", str(addr or "").strip())
+    if len(parts) >= 2:
+        tail = parts[-1]
+        m2 = re.search(r"^(.+?)\sCA\s\d{5}", tail)
+        if m2:
+            return m2.group(1).strip()
+
+    return ""
+
+def pick_sheet_name(sheet_names):
+    # There is a trailing space in the official file
+    for s in sheet_names:
+        if str(s).strip().lower() == "detailed warn report":
+            return s
+    return sheet_names[-1]
 
 def main():
-    print(f"--- Starting CA Scraper for {YEAR} ---")
-    
-    # 1. Ensure Directory Exists (Crucial fix for your missing folder)
-    if not os.path.exists(OUT_DIR):
-        print(f"Creating directory: {OUT_DIR}")
-        os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(OUT_DIR, exist_ok=True)
 
     mappings = load_mappings()
 
-    # 2. Download File
-    print(f"Downloading {URL}...")
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        resp = requests.get(URL, headers=headers, timeout=60)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"CRITICAL: Download failed: {e}")
-        return
+    resp = requests.get(CA_XLSX_URL, headers=HEADERS, timeout=90)
+    resp.raise_for_status()
 
-    # 3. Read Excel
-    try:
-        xls = pd.ExcelFile(BytesIO(resp.content))
-        print(f"Found sheets: {xls.sheet_names}")
-    except Exception as e:
-        print(f"CRITICAL: Could not parse Excel file. It might be corrupt or not an xlsx. Error: {e}")
-        return
+    xls = pd.ExcelFile(BytesIO(resp.content))
+    sheet = pick_sheet_name(xls.sheet_names)
 
-    # 4. Sheet Search Strategy
-    # Instead of guessing the name, we check EVERY sheet until we find valid columns
-    df_clean = None
-    
-    for sheet in xls.sheet_names:
-        print(f"Checking sheet: '{sheet}'...")
-        try:
-            df_raw = pd.read_excel(xls, sheet_name=sheet, header=None)
-            found_df, error = find_header_and_data(df_raw)
-            
-            if found_df is not None:
-                print(f"SUCCESS: Found valid table in '{sheet}'")
-                df_clean = found_df
-                break
-            else:
-                print(f"  Skipping '{sheet}': {error}")
-        except Exception as e:
-            print(f"  Error reading '{sheet}': {e}")
+    # header=1 is critical for this workbook
+    df = pd.read_excel(xls, sheet_name=sheet, header=1)
 
-    if df_clean is None:
-        print("CRITICAL: No valid data found in any sheet.")
-        return
+    cols = {c: str(c).strip().lower() for c in df.columns}
 
-    # 5. Map Columns
-    cols = {c.lower(): c for c in df_clean.columns}
-    
-    def get_col(candidates):
-        for c in candidates:
-            if c.lower() in cols:
-                return cols[c.lower()]
+    def find_col(*needles):
+        for c, lc in cols.items():
+            ok = True
+            for n in needles:
+                if n not in lc:
+                    ok = False
+                    break
+            if ok:
+                return c
         return None
 
-    c_company = get_col(["Company Name", "Company", "Employer", "Employer Name"])
-    c_city = get_col(["City", "Location City", "Worksite City"])
-    c_notice = get_col(["Notice Date", "Received Date", "Date Received"])
-    c_effective = get_col(["Effective Date", "Layoff Date", "Closure/Layoff Date"])
-    c_count = get_col(["No. of Employees", "Employees Affected", "Total Affected", "Number of Employees"])
+    col_notice = find_col("notice", "date")
+    col_effective = find_col("effective", "date")
+    col_company = find_col("company")
+    col_count = find_col("employees")
+    col_address = find_col("address")
 
-    print(f"Mapped Columns: Company=[{c_company}], Date=[{c_notice}], Count=[{c_count}]")
-
-    if not c_company or not c_notice:
-        print("CRITICAL: Found header row but could not map 'Company' or 'Notice Date' columns.")
-        print(f"Available headers: {list(df_clean.columns)}")
+    if not col_notice or not col_company:
+        print("CA required columns missing", list(df.columns))
         return
 
-    # 6. Extract Rows
     rows = []
-    for _, r in df_clean.iterrows():
-        company = str(r.get(c_company, "")).strip()
-        # Filter out junk rows (repeated headers, disclaimers)
-        if not company or company.lower() == "company name" or "report as of" in company.lower():
+    for _, r in df.iterrows():
+        company = htmlmod.unescape(str(r.get(col_company, "")).strip())
+        if not company:
             continue
 
-        notice_date = parse_date(r.get(c_notice, ""))
+        notice_date = parse_date(r.get(col_notice, ""))
         if not notice_date:
             continue
 
-        city = str(r.get(c_city, "")).strip() if c_city else ""
-        effective_date = parse_date(r.get(c_effective, "")) if c_effective else ""
-        
-        # Clean Employee Count
-        emp_raw = str(r.get(c_count, "0"))
+        # Keep only current calendar year in the state file
+        if not notice_date.startswith(str(YEAR) + "-"):
+            continue
+
+        effective_date = parse_date(r.get(col_effective, "")) if col_effective else ""
+
         emp = 0
-        import re
-        digits = re.sub(r"[^0-9]", "", emp_raw)
-        if digits:
-            emp = int(digits)
+        if col_count:
+            try:
+                emp = int(str(r.get(col_count, "0")).replace(",", "").strip() or "0")
+            except Exception:
+                emp = 0
+
+        city = ""
+        if col_address:
+            city = extract_city_from_address(r.get(col_address, ""))
 
         clean_name = apply_clean_name(company, mappings)
-        hash_id = make_hash_id(company, notice_date, effective_date, city, URL)
+        source_url = CA_XLSX_URL
+        hash_id = make_hash_id(company, notice_date, effective_date, city, source_url)
 
         rows.append({
             "hash_id": hash_id,
@@ -185,25 +147,16 @@ def main():
             "employee_count": str(emp),
             "city": city,
             "state": STATE,
-            "source_url": URL
+            "source_url": source_url,
         })
 
-    print(f"Extracted {len(rows)} valid rows.")
-
     if not rows:
-        print("CRITICAL: Table found but 0 rows extracted.")
+        print("CA parsed but produced 0 rows for", YEAR)
         return
 
-    # 7. Save
-    df_final = pd.DataFrame(rows)
-    # Fill missing columns
-    for c in WANTED_COLS:
-        if c not in df_final.columns:
-            df_final[c] = ""
-    df_final = df_final[WANTED_COLS]
-
-    added = upsert_append_csv(OUT_FILE, df_final)
-    print(f"SUCCESS: Added {added} new rows to {OUT_FILE}")
+    out = pd.DataFrame(rows)
+    added = upsert_append_csv(OUT_FILE, out)
+    print("CA added", added, "rows ->", OUT_FILE)
 
 if __name__ == "__main__":
     main()
