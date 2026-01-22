@@ -20,14 +20,30 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pandas openpyxl requests beautifulsoup4 pdfplumber lxml
 
       - name: Run scrapers
         run: |
           python scripts/scrape_ca.py
-          python scripts/scrape_tx.py
-          python scripts/scrape_fl.py
           python scripts/scrape_ny.py
+          # Only run these if you actually have the files
+          if [ -f scripts/scrape_tx.py ]; then python scripts/scrape_tx.py; fi
+          if [ -f scripts/scrape_fl.py ]; then python scripts/scrape_fl.py; fi
+
+      - name: Debug outputs
+        run: |
+          echo "Data files found:"
+          find data -maxdepth 2 -type f -name "*.csv" -print || true
+          echo "Preview CA:"
+          ls -la data/ca || true
+          head -n 3 data/ca/$(date -u +%Y).csv || true
+          echo "Preview NY:"
+          ls -la data/ny || true
+          head -n 3 data/ny/$(date -u +%Y).csv || true
+          echo "Preview site/current_year.csv:"
+          ls -la site || true
+          head -n 5 site/current_year.csv || true
 
       - name: Build site artifacts
         run: |
@@ -37,7 +53,7 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          python scripts/post_social.py
+          if [ -f scripts/post_social.py ]; then python scripts/post_social.py; fi
 
       - name: Commit if changed
         run: |
