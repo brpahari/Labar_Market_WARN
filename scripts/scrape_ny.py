@@ -116,12 +116,20 @@ def main():
 
             if url_clean in seen_urls:
                 continue
+            # Only keep PDFs
+            if not url_clean.lower().endswith(".pdf"):
+                continue
+
 
             time.sleep(0.7)
 
             try:
                 pdf_bytes = session.get(url_clean, headers=headers, timeout=30).content
                 fields = extract_pdf_fields(pdf_bytes)
+                # Skip placeholders or failed parses
+                if not fields.get("notice_date") and not fields.get("effective_date") and fields.get("employee_count", 0) == 0:
+                    continue
+
             except Exception as e:
                 print(f"Failed parsing {url_clean}: {e}")
                 continue
