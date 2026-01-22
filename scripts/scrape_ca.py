@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from io import BytesIO
 from datetime import datetime
 
@@ -18,25 +17,17 @@ MAPPINGS_FILE = "site/mappings.json"
 
 URL = "https://edd.ca.gov/siteassets/files/jobs_and_training/warn/warn_report.xlsx"
 
-def norm(s: str) -> str:
-    s = str(s or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def pick_col(cols, candidates):
-    cols_norm = [(c, norm(c)) for c in cols]
-    for cand in candidates:
-        want = norm(cand)
-        for orig, n in cols_norm:
-            if want == n:
-                return orig
-    for cand in candidates:
-        want = norm(cand)
-        for orig, n in cols_norm:
-            if want in n:
-                return orig
-    return None
+WANTED_COLS = [
+    "hash_id",
+    "company",
+    "clean_name",
+    "notice_date",
+    "effective_date",
+    "employee_count",
+    "city",
+    "state",
+    "source_url",
+]
 
 def parse_date(val) -> str:
     dt = pd.to_datetime(val, errors="coerce")
@@ -53,34 +44,34 @@ def load_mappings():
     except Exception:
         return {}
 
-def read_detailed_sheet(xlsx_bytes: bytes) -> pd.DataFrame:
-    # Try common sheet names first
+def pick_sheet_name(sheet_names):
+    # CA file has 3 sheets. We want Detailed WARN Report.
     preferred = [
         "Detailed WARN Report",
         "Detailed WARN report",
         "Detailed Warn Report",
+        "Detailed WARN",
         "Detailed",
-        "WARN Report Summary",
     ]
+    for p in preferred:
+        if p in sheet_names:
+            return p
+    # fallback, the detailed sheet is often the last one
+    return sheet_names[-1]
 
-    xls = pd.ExcelFile(BytesIO(xlsx_bytes))
-    sheet_names = list(xls.sheet_names)
-
-    chosen = None
-    for s in preferred:
-        if s in sheet_names:
-            chosen = s
-            break
-
-    # Fallback: choose the last sheet (often the detailed one)
-    if chosen is None and sheet_names:
-        chosen = sheet_names[-1]
-
-    df = pd.read_excel(xls, sheet_name=chosen)
-    df.columns = [str(c).strip() for c in df.columns]
-    print("CA sheet chosen:", chosen)
-    print("CA columns:", df.columns.tolist())
-    return df
+def pick_col(cols, candidates):
+    cols_l = {str(c).strip().lower(): str(c).strip() for c in cols}
+    for cand in candidates:
+        c = cand.lower()
+        if c in cols_l:
+            return cols_l[c]
+    # fuzzy contains
+    for cand in candidates:
+        c = cand.lower()
+        for k, orig in cols_l.items():
+            if c in k:
+                return orig
+    return None
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -90,7 +81,15 @@ def main():
     resp = requests.get(URL, timeout=90)
     resp.raise_for_status()
 
-    df_raw = read_detailed_sheet(resp.content)
+    xls = pd.ExcelFile(BytesIO(resp.content))
+    print("CA sheet names:", xls.sheet_names)
+
+    chosen = pick_sheet_name(xls.sheet_names)
+    print("CA chosen sheet:", chosen)
+
+    df_raw = pd.read_excel(xls, sheet_name=chosen)
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+    print("CA columns:", df_raw.columns.tolist())
 
     col_company = pick_col(df_raw.columns, ["Company", "Company Name", "Employer", "Employer Name"])
     col_city = pick_col(df_raw.columns, ["City", "Location City", "Worksite City"])
@@ -98,9 +97,10 @@ def main():
     col_effective = pick_col(df_raw.columns, ["Effective Date", "Layoff Date", "Separation Date", "Closure/Layoff Date"])
     col_count = pick_col(df_raw.columns, ["No. of Employees", "Number of Employees", "Employees Affected", "Total Affected"])
 
+    print("CA matched cols:", col_company, col_city, col_notice, col_effective, col_count)
+
     if not col_company or not col_notice:
-        print("CA required columns missing even on detailed sheet")
-        print("Matched:", col_company, col_notice, col_city, col_effective, col_count)
+        print("CA required columns missing on chosen sheet")
         return
 
     rows = []
@@ -140,10 +140,16 @@ def main():
         })
 
     if not rows:
-        print("CA parsed detailed sheet but produced 0 rows")
+        print("CA parsed sheet but produced 0 rows")
         return
 
     df = pd.DataFrame(rows)
+
+    for c in WANTED_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[WANTED_COLS]
+
     added = upsert_append_csv(OUT_FILE, df)
     print(f"CA added {added} rows -> {OUT_FILE}")
 
