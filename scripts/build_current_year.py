@@ -1,15 +1,20 @@
 import glob
 import os
-import json
+import shutil
+from datetime import datetime
+
 import pandas as pd
-from datetime import datetime, timedelta
+
+YEAR = datetime.utcnow().year
 
 OUT_DIR = "site"
 OUT_CSV = f"{OUT_DIR}/current_year.csv"
-MAPPINGS = f"{OUT_DIR}/mappings.json"
-HISTORY = f"{OUT_DIR}/history_snapshot.json"
 
-WANTED_COLS = [
+# If you keep mappings in site already, this safely no ops
+MAPPINGS_SRC = "site/mappings.json"
+MAPPINGS_DST = f"{OUT_DIR}/mappings.json"
+
+EXPECTED_COLS = [
     "hash_id",
     "company",
     "clean_name",
@@ -23,56 +28,74 @@ WANTED_COLS = [
 
 def ensure_site_files():
     os.makedirs(OUT_DIR, exist_ok=True)
-    if not os.path.exists(MAPPINGS):
-        with open(MAPPINGS, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-    if not os.path.exists(HISTORY):
-        with open(HISTORY, "w", encoding="utf-8") as f:
-            json.dump([], f)
 
-def read_csv_guess_sep(path: str) -> pd.DataFrame:
+    # Ensure mappings.json exists
+    if not os.path.exists(MAPPINGS_DST):
+        with open(MAPPINGS_DST, "w", encoding="utf-8") as f:
+            f.write("{}")
+
+    # If src and dst differ, copy. If same path, do nothing.
     try:
-        return pd.read_csv(path, dtype=str).fillna("")
+        if os.path.exists(MAPPINGS_SRC):
+            if os.path.abspath(MAPPINGS_SRC) != os.path.abspath(MAPPINGS_DST):
+                shutil.copy(MAPPINGS_SRC, MAPPINGS_DST)
     except Exception:
-        return pd.read_csv(path, dtype=str, sep="\t").fillna("")
+        pass
+
+def read_state_year_csv(path: str):
+    try:
+        df = pd.read_csv(path)
+        return df
+    except Exception:
+        return None
+
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Add missing columns
+    for c in EXPECTED_COLS:
+        if c not in df.columns:
+            df[c] = ""
+
+    df = df[EXPECTED_COLS].copy()
+
+    # Normalize types
+    df["employee_count"] = pd.to_numeric(df["employee_count"], errors="coerce").fillna(0).astype(int)
+    for c in ["hash_id", "company", "clean_name", "notice_date", "effective_date", "city", "state", "source_url"]:
+        df[c] = df[c].fillna("").astype(str).str.strip()
+
+    # Drop fully empty junk rows
+    df = df[df["company"].str.len() > 0]
+
+    return df
+
+def write_empty():
+    pd.DataFrame(columns=EXPECTED_COLS).to_csv(OUT_CSV, index=False)
 
 def main():
     ensure_site_files()
 
-    files = sorted(glob.glob("data/*/*.csv"))
     parts = []
-    for p in files:
-        try:
-            df = read_csv_guess_sep(p)
-            if len(df) > 0:
-                parts.append(df)
-        except Exception:
-            pass
+    for path in glob.glob(f"data/*/{YEAR}.csv"):
+        df = read_state_year_csv(path)
+        if df is None or df.empty:
+            continue
+        parts.append(normalize_df(df))
 
     if not parts:
-        pd.DataFrame(columns=WANTED_COLS).to_csv(OUT_CSV, index=False)
-        print("Built", OUT_CSV, "with 0 rows")
+        write_empty()
+        print(f"Built {OUT_CSV} with 0 rows.")
         return
 
-    df = pd.concat(parts, ignore_index=True)
+    merged = pd.concat(parts, ignore_index=True)
 
-    for c in WANTED_COLS:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[WANTED_COLS]
+    # Deduplicate by hash_id
+    merged = merged.drop_duplicates(subset=["hash_id"], keep="last")
 
-    if "hash_id" in df.columns:
-        df = df.drop_duplicates(subset=["hash_id"], keep="first")
+    # Sort newest first, blanks last
+    merged["_nd"] = pd.to_datetime(merged["notice_date"], errors="coerce")
+    merged = merged.sort_values(by=["_nd"], ascending=False).drop(columns=["_nd"])
 
-    df["notice_dt"] = pd.to_datetime(df["notice_date"], errors="coerce")
-    cutoff = datetime.utcnow() - timedelta(days=365)
-    df = df[df["notice_dt"].notna()]
-    df = df[df["notice_dt"] >= cutoff]
-
-    df = df.sort_values(by="notice_dt", ascending=False).drop(columns=["notice_dt"])
-
-    df.to_csv(OUT_CSV, index=False, sep=",")
-    print("Built", OUT_CSV, "with", len(df), "rows")
+    merged.to_csv(OUT_CSV, index=False)
+    print(f"Built {OUT_CSV} with {len(merged)} rows.")
 
 if __name__ == "__main__":
     main()
