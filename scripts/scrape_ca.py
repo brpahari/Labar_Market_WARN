@@ -6,6 +6,9 @@ from datetime import datetime
 import requests
 import pandas as pd
 
+# Ensure we can import from common regardless of run location
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from common import apply_clean_name, make_hash_id, upsert_append_csv
 
 STATE = "CA"
@@ -30,10 +33,17 @@ WANTED_COLS = [
 ]
 
 def parse_date(val) -> str:
-    dt = pd.to_datetime(val, errors="coerce")
-    if pd.isna(dt):
+    if pd.isna(val) or str(val).strip() == "":
         return ""
-    return dt.strftime("%Y-%m-%d")
+    
+    # Handle Excel serial dates or standard formats
+    try:
+        dt = pd.to_datetime(val, errors="coerce")
+        if pd.isna(dt):
+            return ""
+        return dt.strftime("%Y-%m-%d")
+    except:
+        return ""
 
 def load_mappings():
     if not os.path.exists(MAPPINGS_FILE):
@@ -73,43 +83,73 @@ def pick_col(cols, candidates):
                 return orig
     return None
 
+def find_header_row(xls, sheet_name):
+    """
+    Scans the first 20 rows to find the actual header row 
+    by looking for 'Company' and 'Notice Date'.
+    """
+    df_preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=20)
+    
+    for idx, row in df_preview.iterrows():
+        # Convert row to a single lowercase string for easy searching
+        row_text = " ".join([str(x) for x in row.values]).lower()
+        
+        # Check for key columns that MUST exist
+        if "notice date" in row_text and ("company" in row_text or "employer" in row_text):
+            print(f"CA: Found headers on row {idx}")
+            return idx
+            
+    print("CA: Could not auto-detect header row, defaulting to 0")
+    return 0
+
 def main():
+    # Force creation of directory immediately
     os.makedirs(OUT_DIR, exist_ok=True)
 
     mappings = load_mappings()
 
-    resp = requests.get(URL, timeout=90)
-    resp.raise_for_status()
+    print(f"Fetching CA data from {URL}...")
+    try:
+        resp = requests.get(URL, timeout=90, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"CA Download failed: {e}")
+        return
 
     xls = pd.ExcelFile(BytesIO(resp.content))
-    print("CA sheet names:", xls.sheet_names)
-
     chosen = pick_sheet_name(xls.sheet_names)
-    print("CA chosen sheet:", chosen)
+    print(f"CA Sheet: {chosen}")
 
-    df_raw = pd.read_excel(xls, sheet_name=chosen)
+    # FIX: Find the correct header row (skips "Report as of..." lines)
+    header_idx = find_header_row(xls, chosen)
+    
+    df_raw = pd.read_excel(xls, sheet_name=chosen, header=header_idx)
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
-    print("CA columns:", df_raw.columns.tolist())
-
+    
     col_company = pick_col(df_raw.columns, ["Company", "Company Name", "Employer", "Employer Name"])
     col_city = pick_col(df_raw.columns, ["City", "Location City", "Worksite City"])
     col_notice = pick_col(df_raw.columns, ["Notice Date", "Received Date", "Date Received", "WARN Received Date"])
     col_effective = pick_col(df_raw.columns, ["Effective Date", "Layoff Date", "Separation Date", "Closure/Layoff Date"])
     col_count = pick_col(df_raw.columns, ["No. of Employees", "Number of Employees", "Employees Affected", "Total Affected"])
 
-    print("CA matched cols:", col_company, col_city, col_notice, col_effective, col_count)
+    print(f"CA Cols: Company='{col_company}' Notice='{col_notice}'")
 
     if not col_company or not col_notice:
-        print("CA required columns missing on chosen sheet")
+        print("CA required columns missing. Check script logic against Excel file.")
+        print("Available columns:", df_raw.columns.tolist())
         return
 
     rows = []
     for _, r in df_raw.iterrows():
         company = str(r.get(col_company, "")).strip()
-        if not company:
+        # Skip empty rows or rows that repeat the header
+        if not company or company.lower() == "company name":
             continue
 
         notice_date = parse_date(r.get(col_notice, ""))
+        # CA specific cleanup: sometimes they have footnotes like "Company Name*"
+        company = company.replace("*", "").strip()
+
         if not notice_date:
             continue
 
@@ -119,7 +159,12 @@ def main():
         emp = 0
         if col_count:
             try:
-                emp = int(str(r.get(col_count, "0")).replace(",", "").strip() or "0")
+                # Clean "100 (Temporary)" or "1,200"
+                raw_count = str(r.get(col_count, "0"))
+                # Remove non-digits
+                import re
+                clean_count = re.sub(r"[^0-9]", "", raw_count)
+                emp = int(clean_count) if clean_count else 0
             except Exception:
                 emp = 0
 
@@ -145,6 +190,7 @@ def main():
 
     df = pd.DataFrame(rows)
 
+    # Ensure all columns exist
     for c in WANTED_COLS:
         if c not in df.columns:
             df[c] = ""
