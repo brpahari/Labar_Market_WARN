@@ -25,10 +25,12 @@ jobs:
 
       - name: Debug list site
         run: |
-          echo "Listing site folder"
-          ls -la ./site
-          echo "Files"
-          find ./site -maxdepth 2 -type f -print
+          echo "ls -la site"
+          ls -la site
+          echo "symlinks"
+          find site -type l -print || true
+          echo "hardlinks or weird inodes"
+          find site -type f -printf "%n %p\n" | head -200 || true
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
