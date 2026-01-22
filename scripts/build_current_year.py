@@ -1,33 +1,41 @@
 import glob
 import os
 import json
-import shutil
 from datetime import datetime
 
 import pandas as pd
 
 OUT_DIR = "site"
 OUT_CSV = f"{OUT_DIR}/current_year.csv"
-MAPPINGS_SRC = "site/mappings.json"
-MAPPINGS_DST = f"{OUT_DIR}/mappings.json"
 
 HEADER = "hash_id,company,clean_name,notice_date,effective_date,employee_count,city,state,source_url\n"
 
-# Any URLs like this are not real notices. They are landing pages.
 PLACEHOLDER_URL_SUBSTRINGS = [
     "warn-worker-adjustment-and-retraining-notification",
 ]
 
-def main():
+WANTED_COLS = [
+    "hash_id",
+    "company",
+    "clean_name",
+    "notice_date",
+    "effective_date",
+    "employee_count",
+    "city",
+    "state",
+    "source_url",
+]
+
+def ensure_site_files():
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Ensure mappings.json exists in site/
-    if os.path.exists(MAPPINGS_SRC):
-        shutil.copy(MAPPINGS_SRC, MAPPINGS_DST)
-    else:
-        with open(MAPPINGS_DST, "w", encoding="utf-8") as f:
+    # Ensure mappings exists (but do not copy it)
+    mappings_path = os.path.join(OUT_DIR, "mappings.json")
+    if not os.path.exists(mappings_path):
+        with open(mappings_path, "w", encoding="utf-8") as f:
             json.dump({}, f)
 
+def load_all_data_parts():
     parts = []
     for path in glob.glob("data/*/*.csv"):
         try:
@@ -35,39 +43,47 @@ def main():
             parts.append(df_part)
         except Exception as e:
             print(f"Skipping {path}: {e}")
+    return parts
 
+def drop_placeholders(df: pd.DataFrame) -> pd.DataFrame:
+    if "source_url" not in df.columns:
+        return df
+    su = df["source_url"].astype(str)
+    mask = pd.Series(False, index=df.index)
+    for bad in PLACEHOLDER_URL_SUBSTRINGS:
+        mask = mask | su.str.contains(bad, na=False)
+    return df[~mask]
+
+def main():
+    ensure_site_files()
+
+    parts = load_all_data_parts()
     if not parts:
         with open(OUT_CSV, "w", encoding="utf-8") as f:
             f.write(HEADER)
-        print("No data found.")
+        print("No data found. Wrote empty current_year.csv")
         return
 
     df = pd.concat(parts, ignore_index=True)
 
-    # Keep only expected columns if extras appear
-    wanted = ["hash_id","company","clean_name","notice_date","effective_date","employee_count","city","state","source_url"]
-    for c in wanted:
+    # Ensure all expected columns exist
+    for c in WANTED_COLS:
         if c not in df.columns:
             df[c] = ""
-    df = df[wanted]
+    df = df[WANTED_COLS]
 
-    # Remove placeholder rows by URL pattern
-    if "source_url" in df.columns:
-        su = df["source_url"].astype(str)
-        mask = pd.Series(False, index=df.index)
-        for bad in PLACEHOLDER_URL_SUBSTRINGS:
-            mask = mask | su.str.contains(bad, na=False)
-        df = df[~mask]
+    # Remove placeholder landing-page rows
+    df = drop_placeholders(df)
 
-    # Drop duplicates
+    # Deduplicate by hash_id
     if "hash_id" in df.columns:
         df = df.drop_duplicates(subset=["hash_id"])
 
-    # Sort by notice_date if present
+    # Sort by notice_date desc where possible
     df["_nd"] = pd.to_datetime(df["notice_date"], errors="coerce")
     df = df.sort_values(by="_nd", ascending=False).drop(columns=["_nd"])
 
-    # Save as a real comma separated CSV
+    # Save as comma separated CSV
     df.to_csv(OUT_CSV, index=False, sep=",")
     print(f"Built {OUT_CSV} with {len(df)} rows.")
 
