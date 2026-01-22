@@ -11,10 +11,13 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -23,31 +26,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas openpyxl requests beautifulsoup4 pdfplumber lxml
 
-      - name: Run scrapers
+      - name: Run state scrapers
         run: |
           python scripts/scrape_ca.py
           python scripts/scrape_ny.py
-          # Only run these if you actually have the files
           if [ -f scripts/scrape_tx.py ]; then python scripts/scrape_tx.py; fi
           if [ -f scripts/scrape_fl.py ]; then python scripts/scrape_fl.py; fi
 
-      - name: Debug outputs
+      # 🔎 HARD DEBUG STEP — THIS IS CRITICAL
+      - name: Debug scraped data
         run: |
-          echo "Data files found:"
+          echo "=== CSV files found under data/ ==="
           find data -maxdepth 2 -type f -name "*.csv" -print || true
-          echo "Preview CA:"
+
+          echo "=== CA folder ==="
           ls -la data/ca || true
-          head -n 3 data/ca/$(date -u +%Y).csv || true
-          echo "Preview NY:"
+
+          echo "=== NY folder ==="
           ls -la data/ny || true
-          head -n 3 data/ny/$(date -u +%Y).csv || true
-          echo "Preview site/current_year.csv:"
-          ls -la site || true
-          head -n 5 site/current_year.csv || true
+
+          echo "=== Preview CA CSV ==="
+          head -n 5 data/ca/$(date -u +%Y).csv || true
+
+          echo "=== Preview NY CSV ==="
+          head -n 5 data/ny/$(date -u +%Y).csv || true
 
       - name: Build site artifacts
         run: |
           python scripts/build_current_year.py
+
+      - name: Preview site output
+        run: |
+          echo "=== site/current_year.csv ==="
+          head -n 10 site/current_year.csv || true
+          echo "=== site folder ==="
+          ls -la site || true
 
       - name: Broadcast updates
         env:
@@ -55,9 +68,16 @@ jobs:
         run: |
           if [ -f scripts/post_social.py ]; then python scripts/post_social.py; fi
 
-      - name: Commit if changed
+      - name: Commit and push if changed
         run: |
           git config --global user.name "WARN Bot"
           git config --global user.email "warn-bot@users.noreply.github.com"
+
           git add data site/current_year.csv site/mappings.json site/history_snapshot.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update WARN data" && git push)
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update WARN data"
+            git push
+          fi
