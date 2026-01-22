@@ -1,12 +1,13 @@
 import os
 import json
 import re
-import requests
-import pandas as pd
-import pdfplumber
 import time
 from io import BytesIO
 from datetime import datetime
+
+import requests
+import pandas as pd
+import pdfplumber
 from bs4 import BeautifulSoup
 
 from common import apply_clean_name, make_hash_id, upsert_append_csv
@@ -21,13 +22,14 @@ OUT_FILE = f"{OUT_DIR}/{YEAR}.csv"
 MAPPINGS_FILE = "site/mappings.json"
 
 session = requests.Session()
-headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
 
 def parse_date_any(s: str) -> str:
     if not s:
         return ""
-    s = s.strip()
-    s = s.replace("\u2013", "-")
+    s = s.strip().replace("\u2013", "-")
     for fmt in ["%m/%d/%Y", "%m/%d/%y", "%B %d, %Y"]:
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
@@ -72,14 +74,14 @@ def extract_pdf_fields(pdf_bytes: bytes) -> dict:
         try:
             employee_count = int(affected.replace(",", ""))
         except Exception:
-            pass
+            employee_count = 0
 
     return {
         "company": company,
         "notice_date": parse_date_any(notice),
         "effective_date": parse_date_any(closure_start),
         "employee_count": employee_count,
-        "city": city
+        "city": city,
     }
 
 def main():
@@ -87,9 +89,13 @@ def main():
 
     mappings = {}
     if os.path.exists(MAPPINGS_FILE):
-        with open(MAPPINGS_FILE, "r", encoding="utf-8") as f:
-            mappings = json.load(f)
+        try:
+            with open(MAPPINGS_FILE, "r", encoding="utf-8") as f:
+                mappings = json.load(f)
+        except Exception:
+            mappings = {}
 
+    # Load history so we do lazy scraping
     seen_urls = set()
     if os.path.exists(OUT_FILE):
         try:
@@ -97,7 +103,7 @@ def main():
             if "source_url" in df_history.columns:
                 seen_urls = set(df_history["source_url"].astype(str).str.strip().tolist())
         except Exception:
-            pass
+            seen_urls = set()
 
     try:
         html = session.get(LISTING_URL, headers=headers, timeout=60).text
@@ -109,51 +115,59 @@ def main():
 
     rows = []
     for a in soup.select("a[href]"):
-        href = a.get("href") or ""
-        if href.startswith("/warn-") or "/warn-" in href:
-            url = href if href.startswith("http") else BASE + href
-            url_clean = url.strip()
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
 
-            if url_clean in seen_urls:
-                continue
-            # Only keep PDFs
-            if not url_clean.lower().endswith(".pdf"):
-                continue
+        # Make absolute
+        url = href if href.startswith("http") else BASE + href
+        url_clean = url.strip()
 
+        # Only PDFs anywhere on the listing page
+        if not url_clean.lower().endswith(".pdf"):
+            continue
 
-            time.sleep(0.7)
+        # Skip already scraped
+        if url_clean in seen_urls:
+            continue
 
-            try:
-                pdf_bytes = session.get(url_clean, headers=headers, timeout=30).content
-                fields = extract_pdf_fields(pdf_bytes)
-                # Skip placeholders or failed parses
-                if not fields.get("notice_date") and not fields.get("effective_date") and fields.get("employee_count", 0) == 0:
-                    continue
+        time.sleep(0.7)
 
-            except Exception as e:
-                print(f"Failed parsing {url_clean}: {e}")
-                continue
+        try:
+            pdf_bytes = session.get(url_clean, headers=headers, timeout=30).content
+            fields = extract_pdf_fields(pdf_bytes)
+        except Exception as e:
+            print(f"Failed fetching/parsing {url_clean}: {e}")
+            continue
 
-            company = fields.get("company") or a.get_text(strip=True)
-            notice_date = fields.get("notice_date", "")
-            effective_date = fields.get("effective_date", "")
-            city = fields.get("city", "")
-            employee_count = fields.get("employee_count", 0)
+        company = fields.get("company") or a.get_text(strip=True)
+        notice_date = fields.get("notice_date", "")
+        effective_date = fields.get("effective_date", "")
+        city = fields.get("city", "")
+        employee_count = fields.get("employee_count", 0)
 
-            clean_name = apply_clean_name(company, mappings)
-            hash_id = make_hash_id(company, notice_date, effective_date, city, url_clean)
+        # If we cannot parse a notice date, skip (prevents placeholder junk)
+        if not notice_date:
+            continue
 
-            rows.append({
-                "hash_id": hash_id,
-                "company": company,
-                "clean_name": clean_name,
-                "notice_date": notice_date,
-                "effective_date": effective_date,
-                "employee_count": str(employee_count),
-                "city": city,
-                "state": STATE,
-                "source_url": url_clean
-            })
+        # Additional guard
+        if not notice_date and not effective_date and int(employee_count or 0) == 0:
+            continue
+
+        clean_name = apply_clean_name(company, mappings)
+        hash_id = make_hash_id(company, notice_date, effective_date, city, url_clean)
+
+        rows.append({
+            "hash_id": hash_id,
+            "company": company,
+            "clean_name": clean_name,
+            "notice_date": notice_date,
+            "effective_date": effective_date,
+            "employee_count": str(employee_count),
+            "city": city,
+            "state": STATE,
+            "source_url": url_clean,
+        })
 
     if not rows:
         print("NY no new rows found")
