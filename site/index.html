@@ -22,7 +22,11 @@
     .card { background: white; border: 1px solid #e6e6e6; border-radius: 14px; overflow: hidden; box-shadow: 0 1px 0 rgba(0,0,0,0.03); }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 10px 12px; border-bottom: 1px solid #efefef; text-align: left; vertical-align: top; font-size: 14px; }
-    th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; background: #fafafa; position: sticky; top: 170px; z-index: 5; }
+
+    /* FIX 1: thead sticks to top of the scrolling container */
+    .table-wrap { overflow: auto; max-height: calc(100vh - 260px); }
+    thead th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; background: #fafafa; position: sticky; top: 0; z-index: 2; }
+
     tr:hover td { background: #fcfcfc; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #e2e2e2; font-size: 12px; color: #333; background: #fff; }
     .muted { color: #666; font-size: 12px; }
@@ -40,8 +44,8 @@
 
     @media (max-width: 900px) {
       .controls { grid-template-columns: 1fr 1fr; }
-      th { top: 210px; }
       .top-bar { text-align: left; }
+      .table-wrap { max-height: calc(100vh - 300px); }
     }
   </style>
 </head>
@@ -95,7 +99,8 @@
   <main>
     <div class="wrap">
       <div class="card">
-        <div style="overflow:auto; max-height: calc(100vh - 260px);">
+        <!-- FIX 2: use class-based scroll container -->
+        <div class="table-wrap">
           <table>
             <thead>
               <tr>
@@ -244,7 +249,7 @@
         filtered = filtered.filter(r => {
           if (!r.notice_date) return true;
           return withinDays(r.notice_date, days);
-  });
+        });
       }
 
       if (st) {
