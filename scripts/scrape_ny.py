@@ -1,14 +1,11 @@
 import os
 import re
 import json
-import time
-from io import BytesIO
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 import pandas as pd
-import pdfplumber
 from bs4 import BeautifulSoup
 
 from common import apply_clean_name, make_hash_id, upsert_append_csv
@@ -17,24 +14,16 @@ STATE = "NY"
 BASE = "https://dol.ny.gov"
 YEAR = datetime.utcnow().year
 
-# Try multiple known NY pages
-LISTING_URLS = [
-    f"{BASE}/warn-notices",
-    f"{BASE}/{YEAR}-warn-notices",
-    f"{BASE}/warn-notices-{YEAR}",
-]
-
 OUT_DIR = "data/ny"
 OUT_FILE = f"{OUT_DIR}/{YEAR}.csv"
 MAPPINGS_FILE = "site/mappings.json"
 
-session = requests.Session()
+LISTING_URL = f"{BASE}/warn-notices"  # redirects to legacy-warn-notices
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
 }
 
 def parse_date_any(s: str) -> str:
@@ -44,14 +33,7 @@ def parse_date_any(s: str) -> str:
     s = s.replace("\u2013", "-")
     s = re.sub(r"\s+", " ", s)
 
-    fmts = [
-        "%B %d, %Y",
-        "%b %d, %Y",
-        "%m/%d/%Y",
-        "%m/%d/%y",
-        "%Y-%m-%d",
-    ]
-    for fmt in fmts:
+    for fmt in ["%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"]:
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -67,249 +49,160 @@ def parse_date_any(s: str) -> str:
 
     return ""
 
-def is_probable_pdf(url: str) -> bool:
+def to_int(x: str) -> int:
+    if x is None:
+        return 0
+    s = str(x).strip()
+    s = s.replace(",", "")
+    m = re.search(r"-?\d+", s)
+    if not m:
+        return 0
     try:
-        p = urlparse(url)
+        return int(m.group(0))
     except Exception:
-        return False
-    path = (p.path or "").lower()
-    qs = (p.query or "").lower()
-    if ".pdf" in path:
-        return True
-    if ".pdf" in qs:
-        return True
-    # NY often stores PDFs under system files
-    if "system/files/documents" in path and ("warn" in path or "notice" in path):
-        return True
-    return False
+        return 0
 
-def fetch_html(url: str) -> str:
-    try:
-        r = session.get(url, headers=HEADERS, timeout=60, allow_redirects=True)
-        print("NY listing fetch", url, "status", r.status_code, "final", r.url)
-        if r.status_code >= 400:
-            return ""
-        # some sites return html but with bot text
-        txt = r.text or ""
-        return txt
-    except Exception as e:
-        print("NY listing fetch failed", url, str(e))
-        return ""
-
-def extract_pdf_links(html: str, base_url: str):
-    soup = BeautifulSoup(html, "lxml")
-    out = []
-    for a in soup.select("a[href]"):
-        href = (a.get("href") or "").strip()
-        if not href:
-            continue
-        full = urljoin(base_url, href)
-
-        if not is_probable_pdf(full):
-            continue
-
-        title = a.get_text(" ", strip=True) or ""
-        out.append((full.strip(), title.strip()))
-    # de dup by url
-    seen = set()
-    dedup = []
-    for u, t in out:
-        if u in seen:
-            continue
-        seen.add(u)
-        dedup.append((u, t))
-    return dedup
-
-def extract_pdf_fields(pdf_bytes: bytes) -> dict:
-    """
-    NY PDFs are not consistent. We scan first 2 pages and try multiple patterns.
-    """
-    text = ""
-    try:
-        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            if not pdf.pages:
-                return {}
-            pages = pdf.pages[:2]
-            parts = []
-            for pg in pages:
-                parts.append(pg.extract_text() or "")
-            text = "\n".join(parts)
-    except Exception:
-        return {}
-
-    text = text.replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{2,}", "\n", text)
-
-    def first(patterns):
-        for pat in patterns:
-            m = re.search(pat, text, flags=re.IGNORECASE)
-            if m:
-                return (m.group(1) or "").strip()
-        return ""
-
-    company = first([
-        r"Company:\s*(.+)",
-        r"Employer:\s*(.+)",
-        r"Company Name:\s*(.+)",
-    ])
-
-    notice = first([
-        r"Date of Notice:\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Date of Notice:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})",
-        r"Notice Date:\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Notice Date:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})",
-    ])
-
-    effective = first([
-        r"Closure Start Date:\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Closure Start Date:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})",
-        r"Layoff Date:\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Layoff Date:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})",
-        r"Effective Date:\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Effective Date:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})",
-    ])
-
-    affected = first([
-        r"Number of Affected Employees at Site:\s*([0-9,]+)",
-        r"Total Number of Affected Workers:\s*([0-9,]+)",
-        r"Affected Employees:\s*([0-9,]+)",
-        r"Number of Affected Workers:\s*([0-9,]+)",
-    ])
-
-    address = first([
-        r"Address:\s*(.+)",
-        r"Worksite Address:\s*(.+)",
-    ])
-
-    city = ""
-    if address:
-        one = address.split("\n")[0].strip()
-        m = re.search(r",\s*([^,]+),\s*NY\s*\d{5}", one)
-        if m:
-            city = m.group(1).strip()
-        else:
-            m = re.search(r",\s*([^,]+)\s+NY\s*,?\s*\d{5}", one)
-            if m:
-                city = m.group(1).strip()
-
-    employee_count = 0
-    if affected:
-        try:
-            employee_count = int(affected.replace(",", ""))
-        except Exception:
-            employee_count = 0
-
-    return {
-        "company": company,
-        "notice_date": parse_date_any(notice),
-        "effective_date": parse_date_any(effective),
-        "employee_count": employee_count,
-        "city": city,
-    }
-
-def load_mappings():
+def load_mappings() -> dict:
     if os.path.exists(MAPPINGS_FILE):
         try:
             with open(MAPPINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
+                m = json.load(f)
+                if isinstance(m, dict):
+                    return m
         except Exception:
             pass
     return {}
 
+def find_warn_table(soup: BeautifulSoup):
+    # Try common Drupal patterns first
+    for sel in [
+        "table",
+        "table.views-table",
+        "table.table",
+        "table.table-striped",
+    ]:
+        t = soup.select_one(sel)
+        if t and t.find_all("tr"):
+            return t
+    return None
+
+def extract_row_cells(tr):
+    tds = tr.find_all(["td", "th"])
+    return [td.get_text(" ", strip=True) for td in tds]
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-
     mappings = load_mappings()
 
-    seen_urls = set()
+    seen_hashes = set()
     if os.path.exists(OUT_FILE):
         try:
-            df_history = pd.read_csv(OUT_FILE, dtype=str).fillna("")
-            if "source_url" in df_history.columns:
-                seen_urls = set(df_history["source_url"].astype(str).str.strip().tolist())
+            df_old = pd.read_csv(OUT_FILE, dtype=str).fillna("")
+            if "hash_id" in df_old.columns:
+                seen_hashes = set(df_old["hash_id"].astype(str).tolist())
         except Exception:
             pass
 
-    html = ""
-    used_listing = ""
-    for u in LISTING_URLS:
-        html = fetch_html(u)
-        if html and len(html) > 2000:
-            used_listing = u
-            break
+    s = requests.Session()
+    r = s.get(LISTING_URL, headers=HEADERS, timeout=60, allow_redirects=True)
+    print("NY listing fetch", LISTING_URL, "status", r.status_code, "final", r.url)
 
-    if not html:
-        print("NY no listing html found")
+    if r.status_code != 200:
+        print("NY listing not 200")
         return
 
-    links = extract_pdf_links(html, used_listing)
-    print("NY pdf links found", len(links))
+    soup = BeautifulSoup(r.text, "lxml")
 
-    if not links:
-        print("NY no pdf links on page")
+    table = find_warn_table(soup)
+    if not table:
+        print("NY warn table not found on page")
         return
 
-    rows = []
-    for pdf_url, anchor_title in links:
-        if pdf_url in seen_urls:
+    # Detect header map
+    header = None
+    thead = table.find("thead")
+    if thead:
+        hr = thead.find("tr")
+        if hr:
+            header = [h.lower().strip() for h in extract_row_cells(hr)]
+
+    if not header:
+        # fallback use first row as header if it looks like header
+        first_tr = table.find("tr")
+        if first_tr:
+            header = [h.lower().strip() for h in extract_row_cells(first_tr)]
+
+    # Build column index guesses
+    def idx_like(keys):
+        if not header:
+            return None
+        for i, h in enumerate(header):
+            for k in keys:
+                if k in h:
+                    return i
+        return None
+
+    idx_company = idx_like(["company", "employer"])
+    idx_city = idx_like(["city", "location", "county"])
+    idx_notice = idx_like(["notice", "date of notice"])
+    idx_effective = idx_like(["effective", "layoff", "closure", "start"])
+    idx_count = idx_like(["number", "affected", "employees", "workers", "total"])
+
+    if idx_company is None:
+        # many legacy tables have company as first column
+        idx_company = 0
+
+    rows_out = []
+    trs = table.find_all("tr")
+    for tr in trs[1:]:
+        cells = extract_row_cells(tr)
+        if not cells or len(cells) < 2:
             continue
 
-        time.sleep(0.6)
-
-        try:
-            r = session.get(pdf_url, headers={**HEADERS, "Referer": used_listing}, timeout=60, allow_redirects=True)
-            print("NY pdf fetch", r.status_code, r.url)
-            if r.status_code >= 400:
-                continue
-            pdf_bytes = r.content
-        except Exception as e:
-            print("NY pdf fetch failed", pdf_url, str(e))
+        company = cells[idx_company].strip() if idx_company < len(cells) else ""
+        if not company or company.lower() in ["company", "employer"]:
             continue
 
-        fields = extract_pdf_fields(pdf_bytes)
+        city = cells[idx_city].strip() if (idx_city is not None and idx_city < len(cells)) else ""
+        notice_date = parse_date_any(cells[idx_notice]) if (idx_notice is not None and idx_notice < len(cells)) else ""
+        effective_date = parse_date_any(cells[idx_effective]) if (idx_effective is not None and idx_effective < len(cells)) else ""
+        employee_count = to_int(cells[idx_count]) if (idx_count is not None and idx_count < len(cells)) else 0
 
-        company = (fields.get("company") or "").strip()
-        if not company:
-            company = (anchor_title or "").strip()
+        # If the page includes old years, keep only current year notices when possible
+        if notice_date and not notice_date.startswith(str(YEAR)):
+            continue
 
-        if not company:
-            # fallback from filename
-            name = (urlparse(pdf_url).path or "").split("/")[-1]
-            company = re.sub(r"\.pdf$", "", name, flags=re.IGNORECASE).replace("-", " ").replace("_", " ").strip()
+        # Find a source link in the row if present
+        a = tr.find("a", href=True)
+        source_url = urljoin(r.url, a["href"].strip()) if a else r.url
 
-        notice_date = fields.get("notice_date", "")
-        effective_date = fields.get("effective_date", "")
-        city = fields.get("city", "")
-        employee_count = fields.get("employee_count", 0)
-
-        # Important change
-        # Do not skip rows just because parsing failed
-        # We still want NY to show up and the source link to work
         clean_name = apply_clean_name(company, mappings)
-        hash_id = make_hash_id(company, notice_date, effective_date, city, pdf_url)
+        hash_id = make_hash_id(company, notice_date, effective_date, city, source_url)
 
-        rows.append({
+        if hash_id in seen_hashes:
+            continue
+
+        rows_out.append({
             "hash_id": hash_id,
             "company": company,
             "clean_name": clean_name,
             "notice_date": notice_date,
             "effective_date": effective_date,
-            "employee_count": str(int(employee_count) if employee_count else 0),
+            "employee_count": str(employee_count),
             "city": city,
             "state": STATE,
-            "source_url": pdf_url
+            "source_url": source_url,
         })
 
-    if not rows:
-        print("NY no new rows to write")
+    print("NY extracted rows", len(rows_out))
+
+    if not rows_out:
+        print("NY no new rows found")
         return
 
-    df = pd.DataFrame(rows)
-    added = upsert_append_csv(OUT_FILE, df)
-    print("NY added", added)
+    df_new = pd.DataFrame(rows_out)
+    added = upsert_append_csv(OUT_FILE, df_new)
+    print("NY added", added, "rows ->", OUT_FILE)
 
 if __name__ == "__main__":
     main()
